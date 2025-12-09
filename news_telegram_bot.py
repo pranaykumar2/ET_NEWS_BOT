@@ -555,8 +555,8 @@ class AsyncNewsMonitor:
         
         await self.worker_process_queue(WorkerContext(application.bot))
 
-    def run(self):
-        """Main entry point"""
+    async def start_bot(self):
+        """Main Async Entry Point with Manual Lifecycle"""
         if not self.config['telegram_bot_token']:
             logger.error("No token found")
             return
@@ -569,7 +569,6 @@ class AsyncNewsMonitor:
         
         # Add Job
         job_queue = application.job_queue
-        
         # First run immediately
         job_queue.run_once(self.feed_check_job, 1)
         # Then recurring
@@ -579,23 +578,26 @@ class AsyncNewsMonitor:
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("stats", self.stats_command))
         
-        logger.info("Starting Async Bot...")
-        application.run_polling()
-
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("👋 Async News Bot is Running!\nUse /stats to see performance.")
-
-    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        stats = await asyncio.get_running_loop().run_in_executor(self.executor, self.db.get_stats)
-        q_size = self.task_queue.qsize()
-        text = (
-            f"📊 **Bot Stats**\n"
-            f"Queue Size: {q_size}\n"
-            f"Total Sent: {stats['total_sent']}\n"
-            f"Last Hour: {stats['sent_last_hour']}\n"
-            f"Pending Failures: {stats['pending_failures']}"
-        )
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        logger.info("Starting Async Bot (Manual Mode)...")
+        
+        # Explicit Lifecycle Management
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True) # Clean start
+        
+        # Keep running until stop signal
+        stop_signal = asyncio.Event()
+        
+        # Handle signals if possible (Windows/Termux might vary)
+        try:
+            # Simple infinite wait
+            await stop_signal.wait()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            logger.info("Stopping...")
+        finally:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
 
     def download_nltk_resources(self):
         """Ensure necessary NLTK data is downloaded"""
@@ -618,6 +620,8 @@ class AsyncNewsMonitor:
 if __name__ == "__main__":
     try:
         bot = AsyncNewsMonitor()
-        bot.run()
+        asyncio.run(bot.start_bot())
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
         log_exception(e, "Fatal Error in Main Loop")
