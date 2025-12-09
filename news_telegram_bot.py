@@ -374,13 +374,14 @@ class AsyncNewsMonitor:
                     
                     # 1. Download image bytes (Async I/O)
                     image_data = None
-                    if article.image_url:
-                        # Use resilient fetch with shared session
-                        if self.session:
-                             image_data = await self.fetch_url(self.session, article.image_url)
-                        else:
-                             # Fallback logic removed, assuming session exists
-                             pass
+                    try:
+                        if article.image_url:
+                            # Use resilient fetch with shared session
+                            if self.session:
+                                 image_data = await self.fetch_url(self.session, article.image_url)
+                            else:
+                                 # Fallback logic removed, assuming session exists
+                                 pass
                     except Exception as e:
                         logger.warning(f"Failed to download image for {article.title[:20]}: {e}")
                     
