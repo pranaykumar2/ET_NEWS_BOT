@@ -561,9 +561,13 @@ class AsyncNewsMonitor:
             logger.error("No token found")
             return
 
-        # Build Application
-        application = Application.builder().token(self.config['telegram_bot_token']).post_init(self.post_init).post_shutdown(self.post_shutdown).build()
+        # Build Application (No Hooks)
+        application = Application.builder().token(self.config['telegram_bot_token']).build()
         
+        # Manual Session Init
+        self.session = aiohttp.ClientSession()
+        logger.info("Persistent HTTP Session Created (Manual)")
+
         # Add Custom Error Handler
         application.add_error_handler(error_handler)
         
@@ -583,6 +587,10 @@ class AsyncNewsMonitor:
         # Explicit Lifecycle Management
         await application.initialize()
         await application.start()
+        
+        # Start Worker Manually (After Application Start)
+        asyncio.create_task(self.worker_wrapper(application))
+        
         await application.updater.start_polling(drop_pending_updates=True) # Clean start
         
         # Keep running until stop signal
@@ -595,8 +603,14 @@ class AsyncNewsMonitor:
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("Stopping...")
         finally:
-            await application.updater.stop()
-            await application.stop()
+            if self.session:
+                await self.session.close()
+                logger.info("HTTP Session Closed")
+                
+            if application.updater.running:
+                await application.updater.stop()
+            if application.running:
+                await application.stop()
             await application.shutdown()
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
