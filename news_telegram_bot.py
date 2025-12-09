@@ -599,6 +599,21 @@ class AsyncNewsMonitor:
             await application.stop()
             await application.shutdown()
 
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("👋 Async News Bot is Running!\nUse /stats to see performance.")
+
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        stats = await asyncio.get_running_loop().run_in_executor(self.executor, self.db.get_stats)
+        q_size = self.task_queue.qsize()
+        text = (
+            f"📊 **Bot Stats**\n"
+            f"Queue Size: {q_size}\n"
+            f"Total Sent: {stats['total_sent']}\n"
+            f"Last Hour: {stats['sent_last_hour']}\n"
+            f"Pending Failures: {stats['pending_failures']}"
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
     def download_nltk_resources(self):
         """Ensure necessary NLTK data is downloaded"""
         try:
