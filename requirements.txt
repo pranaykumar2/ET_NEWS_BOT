@@ -1,0 +1,10 @@
+python-telegram-bot[job-queue]
+aiohttp
+feedparser
+python-dotenv
+pillow
+sumy
+lxml_html_clean
+setuptools
+numpy
+pytz
