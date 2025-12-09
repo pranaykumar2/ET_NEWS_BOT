@@ -26,6 +26,7 @@ from sumy.parsers.plaintext import PlaintextParser
 from sumy.nlp.tokenizers import Tokenizer
 from sumy.summarizers.lsa import LsaSummarizer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import nltk # Added for resource checking
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
 from telegram.error import TelegramError
@@ -214,6 +215,9 @@ class AsyncNewsMonitor:
         # ThreadPool for CPU bound tasks (DB, Image Gen, Parsing)
         self.executor = ThreadPoolExecutor(max_workers=3)
         
+        # Ensure NLTK resources are available
+        self.download_nltk_resources()
+        
         self.is_startup = True
         self.session: Optional[aiohttp.ClientSession] = None
         
@@ -232,7 +236,9 @@ class AsyncNewsMonitor:
         
         for attempt in range(retries):
             try:
-                async with session.get(url, timeout=15) as response:
+                # Increased timeout for mobile networks
+                timeout = aiohttp.ClientTimeout(total=60, connect=30)
+                async with session.get(url, timeout=timeout) as response:
                     if response.status == 200:
                         return await response.read()
                     else:
@@ -375,6 +381,8 @@ class AsyncNewsMonitor:
                         else:
                              # Fallback logic removed, assuming session exists
                              pass
+                    except Exception as e:
+                        logger.warning(f"Failed to download image for {article.title[:20]}: {e}")
                     
                     # 2. Generate Image (CPU Bound)
                     loop = asyncio.get_running_loop()
@@ -587,6 +595,24 @@ class AsyncNewsMonitor:
             f"Pending Failures: {stats['pending_failures']}"
         )
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    def download_nltk_resources(self):
+        """Ensure necessary NLTK data is downloaded"""
+        try:
+            # Check/Download 'punkt' and 'punkt_tab'
+            try:
+                nltk.data.find('tokenizers/punkt')
+            except LookupError:
+                logger.info("Downloading NLTK 'punkt'...")
+                nltk.download('punkt', quiet=True)
+                
+            try:
+                nltk.data.find('tokenizers/punkt_tab')
+            except LookupError:
+                logger.info("Downloading NLTK 'punkt_tab'...")
+                nltk.download('punkt_tab', quiet=True)
+        except Exception as e:
+            logger.warning(f"NLTK Download Warning: {e}. Summarization might be degraded.")
 
 if __name__ == "__main__":
     try:

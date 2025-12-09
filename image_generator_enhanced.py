@@ -402,9 +402,14 @@ class EnhancedNewsImageGenerator:
             return None
         try:
             img = Image.open(BytesIO(image_data))
+            img.load() # Force load to check for integrity/format errors immediately
             return img.convert('RGB')
         except Exception as e:
-            logger.warning(f"Error processing image data: {e}")
+            error_msg = str(e)
+            if "WEBP" in error_msg or "cannot identify image file" in error_msg:
+                 logger.warning(f"Image Error (Likely missing WEBP support): {error_msg}. Try: pkg install libwebp libjpeg-turbo")
+            else:
+                 logger.warning(f"Error processing image data: {e}")
             return None
 
     def generate_news_image(self, title, description="", timestamp="", image_data: Optional[bytes] = None):
