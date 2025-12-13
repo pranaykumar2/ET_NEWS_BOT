@@ -1,0 +1,8 @@
+{
+    "feeds": [
+        {
+            "name": "Stock News",
+            "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146843.cms"
+        }
+    ]
+}

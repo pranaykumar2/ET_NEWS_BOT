@@ -22,17 +22,17 @@ from concurrent.futures import ThreadPoolExecutor
 import aiohttp
 import feedparser
 import urllib.parse
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lsa import LsaSummarizer
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
-from telegram.error import TelegramError
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram.constants import ParseMode, MessageLimit
+from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue, Defaults
+from telegram.request import HTTPXRequest
+from telegram.error import TelegramError, NetworkError, TimedOut
 
 from config import get_config, validate_config
-from image_generator_enhanced import EnhancedNewsImageGenerator
-from logging_config import setup_logging, error_handler, log_exception
+from image_generator_enhanced import EnhancedNewsImageGenerator as GenEnhanced
+from image_generator_no_webp import EnhancedNewsImageGenerator as GenSimple
+from logging_config import setup_logging, error_handler, log_exception, LogStyler, Colors
+from text_utils import summarizer, normalize_currency_symbols
 from email.utils import parsedate_to_datetime
 
 # Configure Logging System
@@ -138,59 +138,8 @@ class DatabaseManager:
                 'sent_last_hour': sent_last_hour
             }
 
-def normalize_currency_symbols(text: str) -> str:
-    # (Same as before)
-    currency_map = {
-        '₹': 'INR ', '₨': 'INR ', '$': 'USD ', '€': 'EUR ', '£': 'GBP ',
-        '¥': 'JPY ', '₩': 'KRW ', '₽': 'RUB '
-    }
-    for symbol, replacement in currency_map.items():
-        text = text.replace(symbol, replacement)
-    return re.sub(r'\s+', ' ', text)
-
-def summarize_text(text: str, max_chars: int = 350) -> str:
-    """Refined summarization using LSA to pick best sentences"""
-    # 1. Clean HTML
-    text = re.sub('<[^<]+?>', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    # 2. Short circuit if short enough
-    if len(text) <= max_chars:
-        return text
-
-    try:
-        # 3. Use Sumy LSA
-        parser = PlaintextParser.from_string(text, Tokenizer("english"))
-        summarizer = LsaSummarizer()
-        
-        # Determine number of sentences: try capturing 2 key sentences
-        summary_sentences = summarizer(parser.document, 2)
-        
-        summary_text = ' '.join([str(s) for s in summary_sentences])
-        
-        # 4. Fallback if LSA provided empty or massive result
-        if not summary_text or len(summary_text) > max_chars * 1.5:
-             # Fallback to smart truncation if LSA fails or is too verbose
-             pass
-        else:
-             return summary_text
-             
-    except Exception as e:
-        logger.warning(f"Summarizer failed: {e}")
-        
-    # Fallback Mechanism (Smart Truncation)
-    # Try to cut at the last sentence boundary within limit
-    if len(text) > max_chars:
-        excerpt = text[:max_chars]
-        # Find last sentence end
-        last_dot = excerpt.rfind('.')
-        if last_dot > 50:
-             return excerpt[:last_dot+1]
-        
-        # Else split by space
-        return excerpt.rsplit(' ', 1)[0] + '...'
-    
-    return text
+# Removed local normalize_currency_symbols and summarize_text
+# Now using text_utils.py for efficient processing
 
 class AsyncNewsMonitor:
     def __init__(self):
@@ -201,9 +150,10 @@ class AsyncNewsMonitor:
         self.db = DatabaseManager(self.config.get('database_path', 'news_tracker.db'))
         
         # Generator is CPU heavy -> will run in executor
-        self.image_gen = EnhancedNewsImageGenerator(
-             # Configs will be loaded from env inside the class
-        )
+        if self.config.get('need_picture', True):
+             self.image_gen = GenEnhanced()
+        else:
+             self.image_gen = GenSimple()
         
         self.feeds = self.config['rss_feeds']
         self.check_interval = self.config.get('check_interval_minutes', 5)
@@ -232,7 +182,13 @@ class AsyncNewsMonitor:
         
         for attempt in range(retries):
             try:
-                async with session.get(url, timeout=15) as response:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0"
+                }
+                async with session.get(url, headers=headers, timeout=15) as response:
                     if response.status == 200:
                         return await response.read()
                     else:
@@ -300,8 +256,10 @@ class AsyncNewsMonitor:
                 if pub_date_str:
                     pub_dt = parsedate_to_datetime(pub_date_str)
                     if pub_dt.date() != today:
+                        # logger.debug(f"Skipping old article: {entry.get('title')} ({pub_dt.date()})")
                         continue
-            except:
+            except Exception as e:
+                logger.debug(f"Date parse failed for {entry.get('title')}: {e}")
                 continue
 
             # Check DB (run in executor to be safe, though sqlite is fast)
@@ -314,12 +272,13 @@ class AsyncNewsMonitor:
             # Deduplication Check 1: Hash
             is_sent_hash = await loop.run_in_executor(self.executor, self.db.is_article_sent, article_hash)
             if is_sent_hash:
+                # logger.debug(f"Duplicate Hash: {title[:20]}...")
                 continue
 
             # Deduplication Check 2: Title (User requested "title... or anything" check)
             is_sent_title = await loop.run_in_executor(self.executor, self.db.is_title_sent, title)
             if is_sent_title:
-                # logger.info(f"Duplicate title found: {title}")
+                logger.info(f"⏭️ Skipping Duplicate Title: {title[:30]}")
                 continue
 
             # Extract image
@@ -337,7 +296,12 @@ class AsyncNewsMonitor:
             if description:
                 description = html.unescape(description)
                 description = normalize_currency_symbols(description)
-                description = summarize_text(description)
+                # Non-blocking summarization
+                description = await loop.run_in_executor(
+                    self.executor,
+                    summarizer.summarize,
+                    description
+                )
 
             article = NewsArticle(
                 title=title,
@@ -364,7 +328,8 @@ class AsyncNewsMonitor:
                 article, feed_name = item
                 
                 try:
-                    logger.info(f"⚡ Worker processing: {article.title[:30]}...")
+                    # Log handled by Formatter logic (WORK tag)
+                    logger.info(f"{article.title[:45]}...")
                     
                     # 1. Download image bytes (Async I/O)
                     image_data = None
@@ -462,6 +427,11 @@ class AsyncNewsMonitor:
                     else:
                         logger.error(f"Telegram Error: {te}")
 
+                except TimedOut:
+                     logger.warning(f"⚠️ Timeout sending {article.title[:20]} - will retry next cycle implicitly if kept")
+                except NetworkError as ne:
+                     logger.warning(f"⚠️ Network Error sending {article.title[:20]}: {ne}")
+
                 except Exception as e:
                     logger.error(f"Worker failed on article {article.title[:20]}: {e}")
                     await loop.run_in_executor(
@@ -511,7 +481,13 @@ class AsyncNewsMonitor:
                 await self.task_queue.put((article, feed_config['name']))
             
             if articles:
-                logger.info(f"Queued {len(articles)} articles from {feed_config['name']}")
+               LogStyler.box(f"Source: {feed_config['name']}", [
+                   (f"Queued:", f"{len(articles)} New Articles"),
+                   (f"Processing:", "Sent to Worker Queue")
+               ], color=Colors.PURPLE)
+            else:
+               # logger.info(f"No new articles from {feed_config['name']}")
+               pass
 
         if self.is_startup:
             self.is_startup = False
@@ -522,7 +498,7 @@ class AsyncNewsMonitor:
         next_scan = ist_now + timedelta(minutes=self.check_interval)
         next_scan_str = next_scan.strftime("%H:%M:%S")
         
-        logger.info(f"Sleeping for 💤{self.check_interval} minutes... ⏭️ Next Scan at {next_scan_str} IST")
+        logger.info(f"Scan Complete. Scanner sleeping 💤{self.check_interval}m. Next: {next_scan_str}")
 
     async def post_init(self, application: Application):
         """Hook to start background workers and session"""
@@ -552,26 +528,54 @@ class AsyncNewsMonitor:
             logger.error("No token found")
             return
 
-        # Build Application
-        application = Application.builder().token(self.config['telegram_bot_token']).post_init(self.post_init).post_shutdown(self.post_shutdown).build()
+        # Build Application with optimized defaults
+        # Increase timeouts to handle image uploads and network latency
+        request = HTTPXRequest(
+            connection_pool_size=10,
+            read_timeout=30.0,
+            write_timeout=30.0,
+            connect_timeout=20.0
+        )
+        
+        application = (
+            Application.builder()
+            .token(self.config['telegram_bot_token'])
+            .post_init(self.post_init)
+            .post_shutdown(self.post_shutdown)
+            .request(request)
+            .build()
+        )
         
         # Add Custom Error Handler
         application.add_error_handler(error_handler)
         
-        # Add Job
+        # Add Job with generous misfire grace time
         job_queue = application.job_queue
         
         # First run immediately
         job_queue.run_once(self.feed_check_job, 1)
         # Then recurring
-        job_queue.run_repeating(self.feed_check_job, interval=self.check_interval * 60, first=10)
+        job_queue.run_repeating(
+             self.feed_check_job, 
+             interval=self.check_interval * 60, 
+             first=10,
+             job_kwargs={'misfire_grace_time': 300} # 5 minutes grace
+        )
 
         # Commands
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("stats", self.stats_command))
         
-        logger.info("Starting Async Bot...")
-        application.run_polling()
+        # Startup Banner
+        LogStyler.box("ET NEWS BOT STARTED", [
+            ("Time (IST):", datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S")),
+            ("Mode:", "Async / Worker (3 Threads)"),
+            ("Feeds:", f"{len(self.feeds)} Configured"),
+            ("Status:", "Online & Monitoring")
+        ], color=Colors.GREEN)
+        
+        logger.info("Initializing Poll Loop...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👋 Async News Bot is Running!\nUse /stats to see performance.")

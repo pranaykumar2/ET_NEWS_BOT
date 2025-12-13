@@ -74,14 +74,29 @@ class Config:
     SKY_BLUE = parse_rgb(os.getenv('SKY_BLUE', '87,167,255'))
     LIGHT_GREEN = parse_rgb(os.getenv('LIGHT_GREEN', '50,205,50'))
 
+import json
+
 # RSS Feeds Configuration
-RSS_FEEDS = [
-    {
-        "name": "Stock News",
-        "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146843.cms",
-        "max_articles_per_check": MAX_ARTICLES_PER_CHECK
-    }
-]
+def load_feeds():
+    """Load feeds from json or fallback to default."""
+    try:
+        with open('feeds.json', 'r') as f:
+            data = json.load(f)
+            return data.get('feeds', [])
+    except FileNotFoundError:
+        print("feeds.json not found, using default.")
+    except Exception as e:
+        print(f"Error loading feeds.json: {e}")
+        
+    return [
+        {
+            "name": "Stock News",
+            "url": "https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146843.cms",
+            "max_articles_per_check": MAX_ARTICLES_PER_CHECK
+        }
+    ]
+
+RSS_FEEDS = load_feeds()
 
 def get_config() -> Dict:
     """Get complete configuration"""
@@ -92,6 +107,7 @@ def get_config() -> Dict:
         'database_path': DATABASE_PATH,
         'check_interval_minutes': CHECK_INTERVAL_MINUTES,
         'rss_feeds': RSS_FEEDS,
+        'need_picture': os.getenv("NEED_PICTURE", "YES").upper() == "YES",
         'rate_limiting': {
             'min_interval_seconds': MIN_INTERVAL_SECONDS,
             'max_retries': MAX_RETRIES

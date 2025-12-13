@@ -8,3 +8,5 @@ lxml_html_clean
 setuptools
 numpy
 pytz
+requests
+nltk

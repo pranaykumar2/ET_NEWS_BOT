@@ -11,14 +11,10 @@ from typing import Optional
 
 from config import Config
 import os
+import requests
 from pathlib import Path
 import math
 import re
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lsa import LsaSummarizer
-from sumy.nlp.stemmers import Stemmer
-from sumy.utils import get_stop_words
 
 logger = logging.getLogger(__name__)
 
@@ -193,39 +189,53 @@ class EnhancedNewsImageGenerator:
             self.font_brand = self.load_system_font(self.font_brand_size)
 
     def create_mesh_grid_background(self, height: int) -> Image:
-        """Create sophisticated mesh gradient grid background with heavy blur for focus."""
+        """
+        Create sophisticated mesh gradient grid background.
+        Optimized: Draws on smaller canvas and upscales to improve performance of heavy blurs.
+        """
+        # Work at 25% scale for performance on blur operations
+        scale_factor = 0.25
+        small_w = int(self.width * scale_factor)
+        small_h = int(height * scale_factor)
+        
         img = Image.new('RGB', (self.width, height), self.bg_primary)
         
-        # Create mesh grid overlay
-        mesh_overlay = Image.new('RGBA', (self.width, height), (0, 0, 0, 0))
+        # Create mesh grid overlay on small canvas
+        mesh_overlay = Image.new('RGBA', (small_w, small_h), (0, 0, 0, 0))
         mesh_draw = ImageDraw.Draw(mesh_overlay)
         
-        # Grid parameters
-        grid_spacing = 80
-        line_width = 2
+        # Grid parameters (scaled)
+        grid_spacing = int(80 * scale_factor)
+        line_width = max(1, int(2 * scale_factor))
         
-        # Draw vertical grid lines with gradient
-        for x in range(0, self.width, grid_spacing):
-            # Vary opacity based on position
-            opacity = int(15 * (1 - abs(x - self.width // 2) / (self.width // 2)))
-            mesh_draw.line([(x, 0), (x, height)], 
+        # Draw vertical grid lines
+        for x in range(0, small_w, grid_spacing):
+            opacity = int(15 * (1 - abs(x - small_w // 2) / (small_w // 2)))
+            mesh_draw.line([(x, 0), (x, small_h)], 
                           fill=self.text_tertiary + (opacity,), width=line_width)
         
-        # Draw horizontal grid lines with gradient
-        for y in range(0, height, grid_spacing):
-            opacity = int(15 * (1 - abs(y - height // 2) / (height // 2)))
-            mesh_draw.line([(0, y), (self.width, y)], 
+        # Draw horizontal grid lines
+        for y in range(0, small_h, grid_spacing):
+            opacity = int(15 * (1 - abs(y - small_h // 2) / (small_h // 2)))
+            mesh_draw.line([(0, y), (small_w, y)], 
                           fill=self.text_tertiary + (opacity,), width=line_width)
         
-        # Heavy blur to make it very subtle and non-distracting
-        mesh_overlay = mesh_overlay.filter(ImageFilter.GaussianBlur(40))
+        # Blur small image (equivalent to 40px on full size)
+        mesh_overlay = mesh_overlay.filter(ImageFilter.GaussianBlur(10))
+        # Upscale
+        mesh_overlay = mesh_overlay.resize((self.width, height), Image.Resampling.BICUBIC)
         img.paste(mesh_overlay, (0, 0), mesh_overlay)
         
-        # Add gradient color accents at intersection points
-        accent_overlay = Image.new('RGBA', (self.width, height), (0, 0, 0, 0))
+        # Add gradient color accents
+        accent_overlay = Image.new('RGBA', (small_w, small_h), (0, 0, 0, 0))
         accent_draw = ImageDraw.Draw(accent_overlay)
         
-        # Strategic color placement for visual interest
+        # Scaled coordinates
+        def scale_coords(coords):
+            x1, y1, x2, y2 = coords
+            return [int(c * scale_factor) for c in [x1, y1, x2, y2]]
+
+        # Strategic color placement 
         colors = [
             (self.accent_blue, self.width - 400, -150, self.width + 150, 400),
             (self.accent_purple, -200, height - 300, 300, height + 200),
@@ -236,20 +246,13 @@ class EnhancedNewsImageGenerator:
         ]
         
         for color, x1, y1, x2, y2 in colors:
-            # Very low opacity for subtlety
-            accent_draw.ellipse([x1, y1, x2, y2], fill=color + (8,))
+            scaled = scale_coords([x1, y1, x2, y2])
+            accent_draw.ellipse(scaled, fill=color + (8,))
         
-        # Extra heavy blur for vanishing effect
-        accent_overlay = accent_overlay.filter(ImageFilter.GaussianBlur(120))
+        # Heavy blur (equivalent to 120px on full size)
+        accent_overlay = accent_overlay.filter(ImageFilter.GaussianBlur(30))
+        accent_overlay = accent_overlay.resize((self.width, height), Image.Resampling.BICUBIC)
         img.paste(accent_overlay, (0, 0), accent_overlay)
-        
-        # Add noise texture for depth (very subtle)
-        import random
-        random.seed(42)
-        for _ in range(300):
-            x = random.randint(0, self.width)
-            y = random.randint(0, height)
-            accent_draw.ellipse([x, y, x + 1, y + 1], fill=(0, 0, 0, 2))
         
         return img
 
@@ -307,94 +310,7 @@ class EnhancedNewsImageGenerator:
             lines.append(' '.join(current_line))
         return lines
 
-    def smart_reduce_text(self, text: str, max_chars: int) -> str:
-        """Intelligently reduce text using LSA summarization.
-        
-        Args:
-            text: Original text to reduce
-            max_chars: Maximum characters allowed
-            
-        Returns:
-            Intelligently reduced text that maintains meaning
-        """
-        try:
-            # Clean up text
-            text = re.sub('<[^<]+?>', '', text)
-            text = re.sub(r'\s+', ' ', text)
-            text = text.strip()
-            
-            # If already short enough, return as is
-            if not text or len(text) <= max_chars:
-                return text
-            
-            # Try intelligent summarization with LSA
-            parser = PlaintextParser.from_string(text, Tokenizer("english"))
-            stemmer = Stemmer("english")
-            summarizer = LsaSummarizer(stemmer)
-            summarizer.stop_words = get_stop_words("english")
-            
-            # Try different sentence counts
-            for sentence_count in [2, 1, 3]:
-                summary_sentences = summarizer(parser.document, sentence_count)
-                summary_text = ' '.join([str(sentence) for sentence in summary_sentences])
-                
-                if len(summary_text) <= max_chars:
-                    return summary_text
-                
-                # If 1 sentence still too long, truncate intelligently
-                if sentence_count == 1 and len(summary_text) > max_chars:
-                    truncated = summary_text[:max_chars].rsplit('.', 1)[0]
-                    if len(truncated) > 50:
-                        return truncated + '...'
-            
-            # Last resort: intelligent truncation at word boundary
-            sentences = text.split('. ')
-            result = sentences[0]
-            if len(result) > max_chars:
-                result = result[:max_chars].rsplit(' ', 1)[0] + '...'
-            return result
-            
-        except Exception as e:
-            logger.warning(f"Smart reduce failed: {e}, using simple truncation")
-            # Fallback to simple truncation at word boundary
-            if len(text) > max_chars:
-                return text[:max_chars].rsplit(' ', 1)[0] + '...'
-            return text
-
-    def summarize_to_fit(self, text: str, font, max_width: int, max_lines: int, line_height: int) -> str:
-        """Intelligently reduce text to fit within line constraints.
-        
-        Args:
-            text: Original text
-            font: Font to use for measurement
-            max_width: Maximum width per line
-            max_lines: Maximum number of lines allowed
-            line_height: Height of each line
-            
-        Returns:
-            Text reduced to fit within constraints while maintaining meaning
-        """
-        # First wrap to see how many lines we'd need
-        lines = self.wrap_text(text, font, max_width)
-        
-        if len(lines) <= max_lines:
-            return text
-        
-        # Calculate character budget based on typical chars per line
-        avg_chars_per_line = len(text) // max(len(lines), 1)
-        target_chars = avg_chars_per_line * max_lines
-        
-        # Reduce text intelligently
-        reduced_text = self.smart_reduce_text(text, target_chars)
-        
-        # Verify it fits, if not reduce further
-        lines = self.wrap_text(reduced_text, font, max_width)
-        while len(lines) > max_lines and len(reduced_text) > 50:
-            target_chars = int(target_chars * 0.85)  # Reduce by 15%
-            reduced_text = self.smart_reduce_text(text, target_chars)
-            lines = self.wrap_text(reduced_text, font, max_width)
-        
-        return reduced_text
+    # Removed unused smart_reduce_text and summarize_to_fit methods
 
     def process_image_data(self, image_data: bytes) -> Optional[Image.Image]:
         """Prepare image from bytes."""
